@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Voice Assistant</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <link rel="stylesheet" href="/static/styles.css">
+    <style>
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+    </style>
+</head>
+<body>
+    <div class="container-app">
+        <div class="panel">
+            <div class="header">
+                <div class="logo-badge">AI</div>
+                <div class="title">
+                    <h1>AI Voice Assistant</h1>
+                    <p>Your intelligent voice companion</p>
+                </div>
+            </div>
+            <div class="main-area">
+                <div id="chat-container" class="chat-window">
+                    <div class="message assistant">
+                        <strong>Ava</strong>
+                        <div>I'm ready to help you. What can I do for you?</div>
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <!-- Debug panel: a temporary text input to test server/socket without voice -->
+                    <div id="debug-panel" style="width:100%; display:flex; justify-content:center; gap:8px; margin-bottom:12px;">
+                        <input id="debug-input" type="text" placeholder="Type a test message and press Send" style="flex:1; max-width:640px; padding:10px; border-radius:8px; border:1px solid rgba(255,255,255,0.06); background:transparent; color:var(--text-light);" />
+                        <button id="debug-send" class="round-btn" title="Send Test Message" style="width:auto; height:44px; padding:8px 12px; font-size:14px;">Send</button>
+                    </div>
+
+                    <div id="transcript-display" class="transcript-display">
+                        <span id="transcript-text">Listening for your voice...</span>
+                    </div>
+
+                    <div class="button-group">
+                        <button id="start-button" class="round-btn start-btn active" title="Start Assistant">
+                            <i class="fas fa-microphone"></i>
+                            <span>START</span>
+                        </button>
+                        <button id="stop-button" class="round-btn stop-btn" title="Stop Assistant">
+                            <i class="fas fa-stop"></i>
+                            <span>STOP</span>
+                        </button>
+                    </div>
+
+                    <div id="voice-status" class="voice-status listening-active">
+                        <span id="listening-indicator" class="listening-dot"></span>
+                        <span id="voice-text">Listening...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hidden UI elements required by the JS -->
+    <div id="connection-status" style="display:none;">
+        <span>Connecting...</span>
+    </div>
+    <div id="error-message" style="display:none;"></div>
+    <div id="recording-indicator" style="display:none;">Recording...</div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.min.js"></script>
+    <script>
+        // Initialize Socket.IO with connection timeout and better error handling
+        let socket;
+        
+        function initializeSocket(preferPolling = false) {
+            console.log('🔌 Initializing Socket.IO connection (preferPolling=', preferPolling, ')');
+            const transports = preferPolling ? ['polling'] : ['websocket', 'polling'];
+            socket = io({
+                reconnection: true,
+                reconnectionAttempts: 5,
+                reconnectionDelay: 1000,
+                timeout: 10000,
+                transports: transports
+            });
+
+            // Connection established
+            socket.on('connect', () => {
+                console.log('✅ SOCKET CONNECTED (transport=', socket.io.engine.transport.name, ')');
+                updateConnectionStatus('connected');
+                console.log('📨 Emitting start_listening event');
+                socket.emit('start_listening');
+                socket.emit('test_connection', { timestamp: Date.now() });
+            });
+
+            // Connection error — try polling fallback once
+            socket.on('connect_error', (error) => {
+                console.error('❌ Connection error (transport tried=', transports, '):', error);
+                updateConnectionStatus('error');
+                if (!preferPolling) {
+                    console.log('🔁 Retrying connection using polling transport');
+                    // Destroy previous socket and retry using polling
+                    try { socket.close(); } catch (e) { console.warn('Error closing socket before retry', e); }
+                    setTimeout(() => initializeSocket(true), 1000);
+                } else {
+                    console.log('⚠️ Polling fallback also failed, will retry in 5s');
+                    setTimeout(() => initializeSocket(true), 5000);
+                }
+            });
+
+            // Disconnected
+            socket.on('disconnect', (reason) => {
+                console.log('Disconnected:', reason);
+                updateConnectionStatus('disconnected');
+                if (reason === 'io server disconnect') {
+                    socket.connect();
+                }
+            });
+            
+            // Handle test connection response
+            socket.on('test_connection_response', (data) => {
+                console.log('✅ Server connection verified:', data);
+            });
+        }
+        
+        // Update connection status UI
+        function updateConnectionStatus(status) {
+            const statusElement = document.getElementById('connection-status');
+            switch(status) {
+                case 'connected':
+                    statusElement.textContent = 'Connected';
+                    break;
+                case 'connecting':
+                    statusElement.textContent = 'Connecting...';
+                    break;
+                case 'disconnected':
+                    statusElement.textContent = 'Disconnected. Reconnecting...';
+                    break;
+                case 'error':
+                    statusElement.textContent = 'Connection error. Retrying...';
+                    break;
+            }
+        }
+        
+        // Initialize the socket connection
+        updateConnectionStatus('connecting');
+        initializeSocket();
+        
+        // DOM Elements
+        const chatContainer = document.getElementById('chat-container');
+        const startButton = document.getElementById('start-button');
+        const stopButton = document.getElementById('stop-button');
+        const errorMessage = document.getElementById('error-message');
+        const voiceStatus = document.getElementById('voice-status');
+        const voiceText = document.getElementById('voice-text');
+        const transcriptDisplay = document.getElementById('transcript-display');
+        const transcriptText = document.getElementById('transcript-text');
+        const debugInput = document.getElementById('debug-input');
+        const debugSend = document.getElementById('debug-send');
+        
+        // Check if browser supports speech recognition
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        let recognition;
+        let isListening = false;
+        let isAssistantRunning = true; // Start running by default
+        let isSpeaking = false; // Flag to prevent multiple speech overlaps
+        
+        console.log('📱 Browser Speech Recognition available:', !!SpeechRecognition);
+        console.log('🔊 Browser Speech Synthesis available:', 'speechSynthesis' in window);
+        
+        // Initialize speech recognition if available
+        function initSpeechRecognition() {
+            if (!SpeechRecognition) {
+                console.warn('Speech recognition not supported in this browser');
+                startButton.disabled = true;
+                voiceStatus.style.display = 'none';
+                showError('Speech recognition is not supported in your browser. Please use Chrome, Edge, or Safari.');
+                return false;
+            }
+            
+            try {
+                recognition = new SpeechRecognition();
+                recognition.continuous = false;
+                recognition.interimResults = true;
+                recognition.lang = 'en-US';
+                
+                recognition.onstart = () => {
+                    isListening = true;
+                    startButton.classList.add('active');
+                    voiceStatus.classList.add('listening-active');
+                    voiceText.textContent = 'Listening...';
+                    transcriptDisplay.classList.add('active');
+                };
+                
+                recognition.onend = () => {
+                    isListening = false;
+                    startButton.classList.remove('active');
+                    
+                    // Auto-restart listening if assistant is still running and not speaking
+                    if (isAssistantRunning && !isSpeaking) {
+                        setTimeout(() => {
+                            startListening();
+                        }, 1000);
+                    }
+                };
+                
+                recognition.onresult = (event) => {
+                    let interimTranscript = '';
+                    let isFinal = false;
+                    
+                    for (let i = event.resultIndex; i < event.results.length; i++) {
+                        const transcript = event.results[i][0].transcript;
+                        
+                        if (event.results[i].isFinal) {
+                            isFinal = true;
+                        } else {
+                            interimTranscript += transcript;
+                        }
+                    }
+                    
+                    // Display transcript in real-time
+                    if (interimTranscript) {
+                        transcriptText.textContent = interimTranscript;
+                    }
+                    
+                    // Handle final result
+                    if (isFinal) {
+                        const finalTranscript = interimTranscript || event.results[event.results.length - 1][0].transcript;
+                        if (finalTranscript.trim()) {
+                            transcriptText.textContent = finalTranscript;
+                            // Send the message automatically
+                            setTimeout(() => {
+                                sendVoiceMessage(finalTranscript);
+                            }, 300);
+                        }
+                    }
+                };
+                
+                recognition.onerror = (event) => {
+                    console.error('Speech recognition error:', event.error);
+                    let errorMsg = 'Error with speech recognition';
+                    
+                    switch(event.error) {
+                        case 'network':
+                            errorMsg = 'Network error. Retrying...';
+                            break;
+                        case 'not-allowed':
+                            errorMsg = 'Microphone access denied. Please allow permissions.';
+                            isAssistantRunning = false;
+                            break;
+                        case 'no-speech':
+                            errorMsg = 'No speech detected. Listening again...';
+                            break;
+                        case 'audio-capture':
+                            errorMsg = 'No microphone found. Please check your device.';
+                            isAssistantRunning = false;
+                            break;
+                    }
+                    
+                    voiceText.textContent = errorMsg;
+                    
+                    if (event.error !== 'no-speech' && !isAssistantRunning) {
+                        showError(errorMsg);
+                    }
+                };
+                
+                return true;
+            } catch (error) {
+                console.error('Error initializing speech recognition:', error);
+                showError('Could not initialize speech recognition');
+                return false;
+            }
+        }
+        
+        // Start listening
+        function startListening() {
+            if (!isListening && isAssistantRunning && !isSpeaking) {
+                if (!recognition) {
+                    if (!initSpeechRecognition()) {
+                        isAssistantRunning = false;
+                        return;
+                    }
+                }
+                
+                try {
+                    transcriptText.textContent = 'Listening for your voice...';
+                    recognition.start();
+                } catch (error) {
+                    console.error('Error starting voice recognition:', error);
+                    if (isAssistantRunning) {
+                        setTimeout(startListening, 2000);
+                    }
+                }
+            }
+        }
+        
+        // Send voice message
+        function sendVoiceMessage(message) {
+            if (!message.trim()) return;
+            
+            console.log('📢 SENDING MESSAGE:', message);
+            addMessage('user', message);
+            transcriptText.textContent = 'Processing...';
+            voiceText.textContent = 'Processing...';
+            showTypingIndicator();
+            
+            const timeout = setTimeout(() => {
+                console.error('❌ SERVER TIMEOUT - No response after 30 seconds');
+                showError('Server is taking too long to respond. Please try again.');
+                const indicator = document.getElementById('typing-indicator');
+                if (indicator) indicator.remove();
+            }, 30000);
+            
+            socket.emit('user_message', { message }, (response) => {
+                console.log('✅ Server acknowledged:', response);
+                clearTimeout(timeout);
+                const indicator = document.getElementById('typing-indicator');
+                if (indicator) indicator.remove();
+                
+                if (response && response.error) {
+                    console.error('❌ Server error:', response.error);
+                    showError(response.error);
+                }
+            });
+        }
+        
+        // Toggle assistant
+        function toggleAssistant() {
+            console.log('🔘 Toggle button clicked, current state:', isAssistantRunning);
+            isAssistantRunning = !isAssistantRunning;
+            console.log('🔘 New state:', isAssistantRunning);
+            
+            if (isAssistantRunning) {
+                console.log('✅ STARTING ASSISTANT');
+                startButton.classList.add('active');
+                stopButton.classList.remove('active');
+                voiceStatus.classList.add('listening-active');
+                voiceText.textContent = 'Listening...';
+                transcriptDisplay.classList.add('active');
+                startListening();
+            } else {
+                console.log('❌ STOPPING ASSISTANT');
+                startButton.classList.remove('active');
+                stopButton.classList.add('active');
+                voiceStatus.classList.remove('listening-active');
+                voiceText.textContent = 'Stopped';
+                transcriptDisplay.classList.remove('active');
+                transcriptText.textContent = 'Assistant stopped';
+                
+                if (recognition) {
+                    try {
+                        recognition.stop();
+                        isListening = false;
+                    } catch (error) {
+                        console.error('❌ Error stopping recognition:', error);
+                    }
+                }
+            }
+        }
+        
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('📄 DOMContentLoaded fired');
+            console.log('🔘 START button element:', startButton);
+            console.log('🔘 STOP button element:', stopButton);
+            
+            initSpeechRecognition();
+            startListening(); // Auto-start listening
+            
+            // Set up event listeners
+            console.log('🔗 Adding click listeners to buttons');
+            startButton.addEventListener('click', () => {
+                console.log('🖱️ START button clicked');
+                toggleAssistant();
+            });
+            
+            stopButton.addEventListener('click', () => {
+                console.log('🖱️ STOP button clicked');
+                toggleAssistant();
+            });
+
+            // Debug send button (manual testing if voice isn't working)
+            if (debugSend && debugInput) {
+                debugSend.addEventListener('click', () => {
+                    const m = debugInput.value.trim();
+                    if (!m) return;
+                    console.log('🔧 Debug send:', m);
+                    addMessage('user', m);
+                    transcriptText.textContent = 'Processing...';
+                    voiceText.textContent = 'Processing...';
+                    socket.emit('user_message', { message: m }, (response) => {
+                        console.log('🔁 Debug ack from server:', response);
+                    });
+                    debugInput.value = '';
+                });
+
+                // Allow Enter key to send
+                debugInput.addEventListener('keydown', (ev) => {
+                    if (ev.key === 'Enter') {
+                        ev.preventDefault();
+                        debugSend.click();
+                    }
+                });
+            }
+
+            console.log('✅ Button listeners attached');
+        });
+        
+        // Handle incoming messages from the server
+        socket.on('assistant_message', (data) => {
+            console.log('🔵 RECEIVED ASSISTANT MESSAGE:', data);
+            const indicator = document.getElementById('typing-indicator');
+            if (indicator) {
+                indicator.remove();
+            }
+            
+            if (data && data.message) {
+                console.log('✅ Valid message received, adding to chat and speaking');
+                addMessage('assistant', data.message);
+                voiceText.textContent = 'Speaking...';
+                transcriptText.textContent = 'AI is responding...';
+                
+                if ('speechSynthesis' in window) {
+                    try {
+                        console.log('🔊 Starting speech synthesis');
+                        // Stop any ongoing speech
+                        window.speechSynthesis.cancel();
+                        
+                        const utterance = new SpeechSynthesisUtterance(data.message);
+                        utterance.rate = 1.0;
+                        utterance.pitch = 1.0;
+                        utterance.volume = 1.0;
+                        
+                        isSpeaking = true;
+                        console.log('isSpeaking set to TRUE');
+                        
+                        utterance.onstart = () => {
+                            console.log('🔊 Speech started');
+                            isSpeaking = true;
+                        };
+                        
+                        utterance.onend = () => {
+                            console.log('🔊 Speech ended');
+                            isSpeaking = false;
+                            voiceText.textContent = 'Listening...';
+                            transcriptText.textContent = 'Listening for your voice...';
+                            
+                            // Auto-restart listening after response is spoken
+                            if (isAssistantRunning) {
+                                console.log('🎤 Restarting listening after speech');
+                                setTimeout(() => {
+                                    startListening();
+                                }, 800);
+                            }
+                        };
+                        
+                        utterance.onerror = (error) => {
+                            console.error('❌ Speech synthesis error:', error);
+                            isSpeaking = false;
+                            if (isAssistantRunning) {
+                                setTimeout(() => {
+                                    startListening();
+                                }, 1500);
+                            }
+                        };
+                        
+                        console.log('🔊 Calling speechSynthesis.speak()');
+                        window.speechSynthesis.speak(utterance);
+                    } catch (e) {
+                        console.error('❌ Error with speech synthesis:', e);
+                        isSpeaking = false;
+                        if (isAssistantRunning) {
+                            setTimeout(() => {
+                                startListening();
+                            }, 1500);
+                        }
+                    }
+                } else {
+                    console.error('❌ Speech synthesis not available');
+                    isSpeaking = false;
+                    if (isAssistantRunning) {
+                        setTimeout(() => {
+                            startListening();
+                        }, 1500);
+                    }
+                }
+            } else {
+                console.error('❌ Received invalid message format:', data);
+                showError('Error: Invalid response from server');
+                isSpeaking = false;
+                if (isAssistantRunning) {
+                    setTimeout(() => {
+                        startListening();
+                    }, 1500);
+                }
+            }
+        });
+        
+        // Handle connection status
+        socket.on('connect', () => {
+            console.log('Connected to server');
+        });
+        
+        socket.on('disconnect', (reason) => {
+            console.log('Disconnected from server:', reason);
+            if (reason === 'io server disconnect') {
+                showError('Disconnected from server. Please refresh the page.');
+            }
+        });
+        
+        socket.on('connect_error', (error) => {
+            console.error('Connection error:', error);
+            showError('Connection error. Please check your internet connection.');
+        });
+        
+        // Send message to the server (legacy - not used in voice-only mode)
+        function sendMessage() {
+            console.log('sendMessage called but voice-only mode is active');
+        }
+        
+        // Show typing indicator
+        function showTypingIndicator() {
+            const typingIndicator = document.createElement('div');
+            typingIndicator.id = 'typing-indicator';
+            typingIndicator.className = 'message assistant';
+            typingIndicator.innerHTML = `
+                <strong>Ava</strong>
+                <div class="typing-dots">
+                    <div></div>
+                    <div></div>
+                    <div></div>
+                </div>
+            `;
+            chatContainer.appendChild(typingIndicator);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+        
+        // Add a message to the chat
+        function addMessage(sender, message) {
+            const messageDiv = document.createElement('div');
+            const isUser = sender === 'user';
+            
+            messageDiv.className = `message ${isUser ? 'user' : 'assistant'}`;
+            
+            if (!isUser) {
+                const name = document.createElement('strong');
+                name.textContent = 'Ava';
+                messageDiv.appendChild(name);
+            }
+            
+            const content = document.createElement('div');
+            content.textContent = message;
+            messageDiv.appendChild(content);
+            
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+        
+        // Show error message
+        function showError(message) {
+            errorMessage.textContent = message;
+            errorMessage.style.display = 'block';
+            
+            setTimeout(() => {
+                errorMessage.style.display = 'none';
+            }, 5000);
+        }
+    </script>
+</body>
+</html>

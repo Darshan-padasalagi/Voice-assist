@@ -1,0 +1,8 @@
+Unable to find type [Windows.Media.SystemMediaTransportControls].
+At line:1 char:1
++ [Windows.Media.SystemMediaTransportControls]::GetForCurrentView().Rai ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (Windows.Media.S...ansportControls:T 
+   ypeName) [], RuntimeException
+    + FullyQualifiedErrorId : TypeNotFound
+ 
